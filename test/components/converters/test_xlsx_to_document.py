@@ -6,7 +6,7 @@ import csv
 import io
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 from openpyxl import Workbook
@@ -187,6 +187,56 @@ class TestXLSXToDocument:
 
         assert "https://example.com" not in content
         assert "Click here" in content
+
+    @pytest.mark.parametrize(
+        "read_excel_kwargs, expected_rows",
+        [
+            ({"skiprows": 1}, [["1", "[A2](https://a2.example)", "[B2](https://b2.example)", "C2"]]),
+            ({"skiprows": [0]}, [["1", "[A2](https://a2.example)", "[B2](https://b2.example)", "C2"]]),
+            ({"skiprows": iter([0])}, [["1", "[A2](https://a2.example)", "[B2](https://b2.example)", "C2"]]),
+            ({"usecols": "B:B"}, [["1", "[B1](https://b1.example)"], ["2", "[B2](https://b2.example)"]]),
+            ({"usecols": [1]}, [["1", "[B1](https://b1.example)"], ["2", "[B2](https://b2.example)"]]),
+            ({"usecols": iter([1])}, [["1", "[B1](https://b1.example)"], ["2", "[B2](https://b2.example)"]]),
+            ({"skiprows": 1, "usecols": "B:B"}, [["1", "[B2](https://b2.example)"]]),
+            (
+                {"skiprows": lambda row: row == 0, "usecols": lambda column: column == 1},
+                [["1", "[B2](https://b2.example)"]],
+            ),
+            (
+                {"names": ["first", "second", "third"], "usecols": ["second"]},
+                [["1", "[B1](https://b1.example)"], ["2", "[B2](https://b2.example)"]],
+            ),
+        ],
+    )
+    def test_link_extraction_after_row_and_column_selection(
+        self, read_excel_kwargs: dict[str, Any], expected_rows: list[list[str]]
+    ) -> None:
+        workbook = Workbook()
+        sheet = workbook.active
+        assert sheet is not None
+        sheet.append(["A1", "B1", "C1"])
+        sheet.append(["A2", "B2", "C2"])
+        for cell in ["A1", "B1", "A2", "B2"]:
+            sheet[cell].hyperlink = f"https://{cell.lower()}.example"
+        stream = io.BytesIO()
+        workbook.save(stream)
+        workbook.close()
+
+        converter = XLSXToDocument(link_format="markdown", read_excel_kwargs=read_excel_kwargs)
+        content = converter.run(sources=[ByteStream(data=stream.getvalue())])["documents"][0].content
+        assert content is not None
+        assert list(csv.reader(io.StringIO(content)))[1:] == expected_rows
+
+    def test_plain_links_after_row_and_column_selection(self, test_files_path: Path) -> None:
+        converter = XLSXToDocument(link_format="plain", read_excel_kwargs={"skiprows": 1, "usecols": "B:B"})
+        content = converter.run(sources=[test_files_path / "xlsx" / "spreadsheet_with_links.xlsx"])["documents"][
+            0
+        ].content
+        assert content is not None
+        assert [row[1] for row in list(csv.reader(io.StringIO(content)))[1:]] == [
+            "Click here (https://example.com)",
+            "Docs (https://python.org)",
+        ]
 
     @pytest.mark.parametrize("link_format", ["markdown", "plain"])
     @pytest.mark.parametrize("table_format", ["csv", "markdown"])

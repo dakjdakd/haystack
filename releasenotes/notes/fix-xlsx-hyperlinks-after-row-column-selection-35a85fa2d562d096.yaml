@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    Preserve hyperlinks in ``XLSXToDocument`` when ``read_excel_kwargs`` selects rows with
+    ``skiprows`` or columns with ``usecols``. Links now follow their original cells into
+    the converted table instead of appearing on another cell or being omitted.

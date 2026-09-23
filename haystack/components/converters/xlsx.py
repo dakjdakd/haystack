@@ -4,6 +4,8 @@
 
 import io
 import os
+from collections.abc import Iterable, Iterator
+from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,9 +19,43 @@ logger = logging.getLogger(__name__)
 with LazyImport("Run 'pip install pandas openpyxl'") as pandas_xlsx_import:
     import openpyxl
     import pandas as pd
+    from openpyxl.utils import column_index_from_string
 
 with LazyImport("Run 'pip install tabulate'") as tabulate_import:
     from tabulate import tabulate  # noqa: F401 # the library is used but not directly referenced
+
+
+def _row_positions(sheet_rows: int, dataframe_rows: int, skiprows: Any) -> dict[int, int]:
+    source_rows: Iterable[int]
+    if isinstance(skiprows, int):
+        source_rows = range(skiprows, skiprows + dataframe_rows)
+    elif callable(skiprows):
+        source_rows = (row for row in range(sheet_rows) if not skiprows(row))
+    else:
+        skipped_rows = set(skiprows) if skiprows is not None else set()
+        source_rows = (row for row in range(sheet_rows) if row not in skipped_rows)
+    return {row: position for position, row in enumerate(islice(source_rows, dataframe_rows))}
+
+
+def _column_positions(sheet_columns: int, usecols: Any, names: Any) -> dict[int, int]:
+    source_columns: list[int]
+    if isinstance(usecols, str):
+        source_columns = []
+        for part in usecols.split(","):
+            first, _, last = part.strip().partition(":")
+            source_columns.extend(range(column_index_from_string(first) - 1, column_index_from_string(last or first)))
+        source_columns = sorted(set(source_columns))
+    elif usecols is None:
+        source_columns = list(range(sheet_columns))
+    else:
+        column_labels = names if names is not None else range(sheet_columns)
+        if callable(usecols):
+            source_columns = [column for column, label in enumerate(column_labels) if usecols(label)]
+        elif all(isinstance(column, int) for column in usecols):
+            source_columns = [column for column in range(sheet_columns) if column in usecols]
+        else:
+            source_columns = [column for column, label in enumerate(column_labels) if label in usecols]
+    return {column: position for position, column in enumerate(source_columns)}
 
 
 @component
@@ -88,7 +124,10 @@ class XLSXToDocument:
             tabulate_import.check()
         self.link_format = link_format
         self.sheet_name = sheet_name
-        self.read_excel_kwargs = read_excel_kwargs or {}
+        self.read_excel_kwargs = dict(read_excel_kwargs or {})
+        for selection in ("skiprows", "usecols"):
+            if isinstance(self.read_excel_kwargs.get(selection), Iterator):
+                self.read_excel_kwargs[selection] = tuple(self.read_excel_kwargs[selection])
         self.table_format_kwargs = table_format_kwargs or {}
         self.store_full_path = store_full_path
 
@@ -185,12 +224,21 @@ class XLSXToDocument:
                     ws = wb.active
                 else:
                     ws = wb[sheet_key]
+                row_positions = _row_positions(
+                    ws.max_row, len(sheet_to_dataframe[sheet_key]), self.read_excel_kwargs.get("skiprows")
+                )
+                column_positions = _column_positions(
+                    ws.max_column, self.read_excel_kwargs.get("usecols"), self.read_excel_kwargs.get("names")
+                )
+
                 cell_links: dict[tuple[int, int], str] = {}
                 for row in ws.iter_rows():
                     for cell in row:
                         if cell.hyperlink and cell.hyperlink.target:
-                            # Convert to 0-based indices to match DataFrame positions
-                            cell_links[(cell.row - 1, cell.column - 1)] = cell.hyperlink.target
+                            row_idx = row_positions.get(cell.row - 1)
+                            col_idx = column_positions.get(cell.column - 1)
+                            if row_idx is not None and col_idx is not None:
+                                cell_links[(row_idx, col_idx)] = cell.hyperlink.target
                 hyperlinks_by_sheet[sheet_key] = cell_links
             wb.close()
 
